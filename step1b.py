@@ -2,8 +2,7 @@
 Thesis Step 1b: Bayesian Linear Regression on synthetic data
   -- with scipy.stats distribution OBJECTS + model evidence
 --------------------------------------------------------------
-Same pipeline as thesis_step1_bayesian_mlr.py, with two changes per
-Daniel's feedback:
+Same pipeline as thesis_step1_bayesian_mlr.py, with two changes:
 
   (A) The posterior over sigma^2 (and beta | sigma^2) is represented as a
       frozen scipy.stats distribution object, not just a one-off .rvs()
