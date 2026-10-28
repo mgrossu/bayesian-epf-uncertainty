@@ -1,13 +1,38 @@
 """
 Step 4: non-stationary synthetic data, window comparison, PPD / posterior plots
 -------------------------------------------------------------------------------
+
+  * Data are generated from a MIXTURE of three component models whose weights
+    shift smoothly over time (each component is "the most true" in a different
+    period). The components also differ in noise level, so some periods have
+    broad predictive distributions and others narrow ones.
+  * Linear algebra uses np.linalg.solve instead of explicit inverses.
+  * The brentq search interval for mixture quantiles is built automatically
+    from the component quantiles (min of lower, max of upper).
+  * Expanding window vs. fixed rolling windows (bias-variance trade-off).
+  * Plots: PPDs for low/high-noise and transition periods, posterior vs. PPD,
+    posterior histograms with their theoretical densities overlaid.
+
+Update (Oct 28):
+
+  * Two nominal interval levels (50% and 80%) instead of one.
+  * Tempered BMA weights  w_k  proportional to  exp(eta * log_evidence_k),
+    eta = 1 is standard BMA, eta -> 0 gives equal weights. A few values only.
+  * Systematic comparison of the four layers (point, plug-in Gaussian,
+    single-model PPD, tempered mixture PPD) with the same metrics.
+  * Log predictive score computed with scipy.special.logsumexp.
+
+Note on the evidence: the Bayesian model evidence is a
+model selection criterion and the standard BMA weight. It is NOT an estimator
+of the generating mixture weights, so the plot below compares the two but does
+not expect them to agree.
 """
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import t as student_t, norm, invgamma
-from scipy.special import gammaln
+from scipy.special import gammaln, logsumexp
 from scipy.optimize import brentq
 
 SHOW = False            # set True to open figure windows
@@ -74,9 +99,10 @@ def ppd(fit, x_star):
     return student_t(df=2 * fit["a_n"], loc=x_star @ fit["mu_n"], scale=np.sqrt(scale2))
 
 
-def softmax(logv):
-    e = np.exp(logv - np.max(logv))
-    return e / e.sum()
+def log_softmax(v):
+    """Numerically stable log of softmax(v), via logsumexp."""
+    v = np.asarray(v, dtype=float)
+    return v - logsumexp(v)
 
 
 def mixture_cdf(yv, comps, w):
@@ -107,51 +133,103 @@ def fit_all(s, window):
 
 
 # =============================================================================
-# 2. Rolling-origin forecasting study for a given window setting
+# 2. Rolling-origin forecasting study, all four layers
 # =============================================================================
 START = 100
+LEVELS = (0.5, 0.8)            # nominal central interval levels
+ETAS = (1.0, 0.5, 0.25)        # inverse temperatures (1 = standard BMA)
+MAIN_ETA = 0.5
+MAIN = "rolling 100"
+windows = {"expanding": None, "rolling 100": 100, "rolling 40": 40}
 
 
-def run_study(window, level=0.80):
-    alpha = 1 - level
-    out = dict(s=[], y=[], lo=[], hi=[], logscore=[], W=[],
-               single_inside=[[] for _ in range(K)], single_w=[[] for _ in range(K)],
-               single_ls=[[] for _ in range(K)], mean=[])
+def new_layer():
+    return dict(lo={l: [] for l in LEVELS}, hi={l: [] for l in LEVELS}, lps=[], mean=[])
+
+
+def record(layer, dist, y_obs):
+    for l in LEVELS:
+        layer["lo"][l].append(dist.ppf((1 - l) / 2))
+        layer["hi"][l].append(dist.ppf(1 - (1 - l) / 2))
+    layer["lps"].append(dist.logpdf(y_obs))
+    layer["mean"].append(dist.mean())
+
+
+def run_study(window):
+    """Layers 2-3 use the model with the highest evidence at each step;
+    layer 4 is the tempered mixture (one run per eta)."""
+    out = dict(s=[], y=[], L1=[], L2=new_layer(), L3=new_layer(),
+               L4={e: new_layer() for e in ETAS}, W={e: [] for e in ETAS})
     for s in range(START, n_total):
         fits = fit_all(s, window)
         comps = [ppd(fits[m], X_M[m][s]) for m in range(K)]
-        w = softmax(np.array([f["log_ev"] for f in fits]))
-        lo, hi = mixture_ppf(alpha / 2, comps, w), mixture_ppf(1 - alpha / 2, comps, w)
-        out["s"].append(s); out["y"].append(y[s]); out["lo"].append(lo); out["hi"].append(hi)
-        out["W"].append(w)
-        out["mean"].append(sum(wi * c.mean() for wi, c in zip(w, comps)))
-        out["logscore"].append(np.log(sum(wi * c.pdf(y[s]) for wi, c in zip(w, comps))))
-        for m in range(K):
-            l, h = comps[m].ppf(alpha / 2), comps[m].ppf(1 - alpha / 2)
-            out["single_inside"][m].append(l <= y[s] <= h)
-            out["single_w"][m].append(h - l)
-            out["single_ls"][m].append(comps[m].logpdf(y[s]))
-    for k in ("s", "y", "lo", "hi", "logscore", "W", "mean"):
-        out[k] = np.array(out[k])
+        logev = np.array([f["log_ev"] for f in fits])
+        top = int(np.argmax(logev))
+        f, mu = fits[top], X_M[top][s] @ fits[top]["mu_n"]
+        out["s"].append(s); out["y"].append(y[s])
+        out["L1"].append(mu)                                               # layer 1
+        record(out["L2"], norm(mu, np.sqrt(f["b_n"] / (f["a_n"] - 1))), y[s])  # layer 2
+        record(out["L3"], comps[top], y[s])                                # layer 3
+        logpdfs = np.array([c.logpdf(y[s]) for c in comps])
+        for e in ETAS:                                                     # layer 4
+            logw = log_softmax(e * logev)
+            w = np.exp(logw)
+            lay = out["L4"][e]
+            for l in LEVELS:
+                lay["lo"][l].append(mixture_ppf((1 - l) / 2, comps, w))
+                lay["hi"][l].append(mixture_ppf(1 - (1 - l) / 2, comps, w))
+            lay["lps"].append(logsumexp(logw + logpdfs))                   # stable
+            lay["mean"].append(float(w @ np.array([c.mean() for c in comps])))
+            out["W"][e].append(w)
+    out["s"], out["y"], out["L1"] = map(np.array, (out["s"], out["y"], out["L1"]))
+    for lay in [out["L2"], out["L3"]] + list(out["L4"].values()):
+        lay["lps"], lay["mean"] = np.array(lay["lps"]), np.array(lay["mean"])
+        for l in LEVELS:
+            lay["lo"][l], lay["hi"][l] = np.array(lay["lo"][l]), np.array(lay["hi"][l])
+    out["W"] = {e: np.array(v) for e, v in out["W"].items()}
     return out
 
 
-windows = {"expanding": None, "rolling 100": 100, "rolling 40": 40}
-results = {}
-print(f"{'setting':<14}{'method':<10}{'coverage':>10}{'mean width':>12}{'mean log score':>16}")
-for name, win in windows.items():
-    r = run_study(win)
-    results[name] = r
-    inside = (r["y"] >= r["lo"]) & (r["y"] <= r["hi"])
-    print(f"{name:<14}{'mixture':<10}{inside.mean():>10.1%}{(r['hi']-r['lo']).mean():>12.2f}"
-          f"{r['logscore'].mean():>16.3f}")
-    for m in range(K):
-        print(f"{'':<14}{'M'+str(m+1):<10}{np.mean(r['single_inside'][m]):>10.1%}"
-              f"{np.mean(r['single_w'][m]):>12.2f}{np.mean(r['single_ls'][m]):>16.3f}")
-print("(nominal coverage 80%; higher log score is better)")
+def metrics(lay, yv):
+    d = {}
+    for l in LEVELS:
+        d[f"cov{int(l*100)}"] = np.mean((yv >= lay["lo"][l]) & (yv <= lay["hi"][l]))
+        d[f"width{int(l*100)}"] = np.mean(lay["hi"][l] - lay["lo"][l])
+    d["lps"] = lay["lps"].mean()
+    return d
 
-MAIN = "rolling 100"
+
+results = {name: run_study(win) for name, win in windows.items()}
+
+rows = []      # (window, layer, eta, metrics dict)
+for name, r in results.items():
+    rows.append((name, "1 point", None, dict(rmse=np.sqrt(np.mean((r["y"] - r["L1"]) ** 2)))))
+    rows.append((name, "2 plug-in Gaussian", None, metrics(r["L2"], r["y"])))
+    rows.append((name, "3 single-model PPD", None, metrics(r["L3"], r["y"])))
+    for e in ETAS:
+        rows.append((name, "4 mixture PPD", e, metrics(r["L4"][e], r["y"])))
+
+hdr = f"{'window':<13}{'layer':<20}{'eta':>5}{'cov50':>8}{'cov80':>8}{'w50':>7}{'w80':>7}{'LPS':>9}{'RMSE':>7}"
+print(hdr)
+for name, layer, e, d in rows:
+    fmt = lambda k, f: (format(d[k], f) if k in d else "")
+    print(f"{name:<13}{layer:<20}{'' if e is None else e:>5}"
+          f"{fmt('cov50', '8.1%') :>8}{fmt('cov80', '8.1%'):>8}{fmt('width50', '7.2f'):>7}"
+          f"{fmt('width80', '7.2f'):>7}{fmt('lps', '9.3f'):>9}{fmt('rmse', '7.2f'):>7}")
+print("(nominal 50% / 80%; LPS = mean log predictive score, higher is better; "
+      "layers 2-3 use the highest-evidence model at each step)")
+
+import csv
+with open("figures/step4_results.csv", "w", newline="") as fh:
+    wr = csv.writer(fh)
+    wr.writerow(["window", "layer", "eta", "cov50", "cov80", "width50", "width80", "lps", "rmse"])
+    for name, layer, e, d in rows:
+        wr.writerow([name, layer, e] + [d.get(k, "") for k in
+                     ("cov50", "cov80", "width50", "width80", "lps", "rmse")])
+
 R = results[MAIN]
+LM = R["L4"][MAIN_ETA]
+WM = R["W"][MAIN_ETA]
 
 # =============================================================================
 # 3. Figures
@@ -176,46 +254,91 @@ for m in range(K):
 ax[1].set_ylabel("y (coloured by active component)"); ax[1].set_xlabel("time step")
 finish("step4_generating_process")
 
-# --- 3b. forecasts + evidence-based BMA weights ---------------------------------
-inside_main = (R["y"] >= R["lo"]) & (R["y"] <= R["hi"])
+# --- 3b. forecasts + tempered BMA weights --------------------------------------
 fig, ax = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
-ax[0].fill_between(R["s"], R["lo"], R["hi"], alpha=0.3, color="darkorange", label="80% mixture interval")
-ax[0].plot(R["s"], R["mean"], color="darkorange", lw=1, label="mixture mean")
+ax[0].fill_between(R["s"], LM["lo"][0.8], LM["hi"][0.8], alpha=0.25, color="darkorange", label="80% interval")
+ax[0].fill_between(R["s"], LM["lo"][0.5], LM["hi"][0.5], alpha=0.45, color="darkorange", label="50% interval")
+ax[0].plot(R["s"], LM["mean"], color="darkorange", lw=1, label="mixture mean")
 ax[0].plot(R["s"], R["y"], ".", color="black", ms=3, label="y_true")
-ax[0].set_title(f"Mixture-PPD forecasts, window = {MAIN}: coverage {inside_main.mean():.1%} (nominal 80%)")
+cov_txt = ", ".join(f"{int(l*100)}%: {np.mean((R['y']>=LM['lo'][l])&(R['y']<=LM['hi'][l])):.1%}" for l in LEVELS)
+ax[0].set_title(f"Mixture-PPD forecasts, {MAIN}, eta={MAIN_ETA}: coverage {cov_txt}")
 ax[0].legend(fontsize=8, loc="upper right")
-ax[1].stackplot(R["s"], R["W"].T, colors=colors, alpha=0.7, labels=[c["name"] for c in components])
-ax[1].set_ylabel("evidence (BMA) weight"); ax[1].legend(fontsize=8, loc="upper right")
-ax[1].set_title("Evidence-based BMA weights (model selection criterion, not a weight estimator)")
+ax[1].stackplot(R["s"], WM.T, colors=colors, alpha=0.7, labels=[c["name"] for c in components])
+ax[1].set_ylabel(f"BMA weight (eta={MAIN_ETA})"); ax[1].legend(fontsize=8, loc="upper right")
+ax[1].set_title("Tempered evidence weights (model selection criterion, not a weight estimator)")
 ax[2].stackplot(t_idx[START:], W_true[START:].T, colors=colors, alpha=0.7)
 ax[2].set_ylabel("generating weight"); ax[2].set_xlabel("time step")
 finish("step4_forecasts_and_weights")
 
-# --- 3c. window comparison -----------------------------------------------------
-fig, ax = plt.subplots(1, 2, figsize=(10, 3.8))
-names = list(results)
-cov = [np.mean((results[n]["y"] >= results[n]["lo"]) & (results[n]["y"] <= results[n]["hi"])) for n in names]
-ls = [results[n]["logscore"].mean() for n in names]
-ax[0].bar(names, cov, color="steelblue"); ax[0].axhline(0.8, color="red", ls="--", label="nominal 80%")
-ax[0].set_ylim(0, 1); ax[0].set_title("Empirical coverage"); ax[0].legend(fontsize=8)
-ax[1].bar(names, ls, color="seagreen"); ax[1].set_title("Mean log predictive score (higher = better)")
-finish("step4_window_comparison")
+# --- 3b2. effect of the inverse temperature on the weights ----------------------
+fig, ax = plt.subplots(len(ETAS) + 1, 1, figsize=(10, 9), sharex=True)
+for i, e in enumerate(ETAS):
+    ax[i].stackplot(R["s"], R["W"][e].T, colors=colors, alpha=0.7)
+    ax[i].set_ylabel(f"eta = {e}")
+ax[-1].stackplot(t_idx[START:], W_true[START:].T, colors=colors, alpha=0.7)
+ax[-1].set_ylabel("generating"); ax[-1].set_xlabel("time step")
+ax[0].set_title(f"BMA weights for different inverse temperatures ({MAIN})")
+finish("step4_eta_weights")
+
+# --- 3c. systematic comparison of the four layers -------------------------------
+layers = [("2 plug-in", R["L2"]), ("3 single PPD", R["L3"]), (f"4 mixture\n(eta={MAIN_ETA})", LM)]
+fig, ax = plt.subplots(1, 3, figsize=(14, 4))
+xs = np.arange(len(layers)); bw = 0.38
+for j, l in enumerate(LEVELS):
+    vals = [np.mean((R["y"] >= lay["lo"][l]) & (R["y"] <= lay["hi"][l])) for _, lay in layers]
+    ax[0].bar(xs + (j - 0.5) * bw, vals, bw, label=f"{int(l*100)}% interval")
+    ax[0].hlines(l, xs[0] - 0.5, xs[-1] + 0.5, color="red", ls="--", lw=1)
+ax[0].set_xticks(xs); ax[0].set_xticklabels([n for n, _ in layers], fontsize=8)
+ax[0].set_ylim(0, 1); ax[0].set_title("Empirical coverage (red = nominal)"); ax[0].legend(fontsize=8)
+for j, l in enumerate(LEVELS):
+    ax[1].bar(xs + (j - 0.5) * bw, [np.mean(lay["hi"][l] - lay["lo"][l]) for _, lay in layers], bw,
+              label=f"{int(l*100)}%")
+ax[1].set_xticks(xs); ax[1].set_xticklabels([n for n, _ in layers], fontsize=8)
+ax[1].set_title("Mean interval width"); ax[1].legend(fontsize=8, loc="upper center", ncol=2)
+ax[1].set_ylim(0, 6.5)
+lps_vals = [lay["lps"].mean() for _, lay in layers]
+ax[2].plot(xs, lps_vals, "o", color="seagreen", ms=9)
+for x_, v_ in zip(xs, lps_vals):
+    ax[2].annotate(f"{v_:.3f}", (x_, v_), textcoords="offset points", xytext=(0, 9), ha="center", fontsize=8)
+ax[2].set_xticks(xs); ax[2].set_xticklabels([n for n, _ in layers], fontsize=8)
+pad = 0.3 * (max(lps_vals) - min(lps_vals) + 0.02)
+ax[2].set_ylim(min(lps_vals) - pad, max(lps_vals) + pad)
+ax[2].set_title("Mean log predictive score (higher = better)")
+fig.suptitle(f"Layer comparison, {MAIN}", y=1.02)
+finish("step4_layer_comparison")
+
+# --- 3c2. window x eta comparison ------------------------------------------------
+fig, ax = plt.subplots(1, 3, figsize=(15, 4))
+names = list(results); xs = np.arange(len(names)); bw = 0.8 / len(ETAS)
+panels = [("cov80", "Coverage of 80% interval", 0.8), ("cov50", "Coverage of 50% interval", 0.5),
+          ("lps", "Mean log predictive score", None)]
+for a_, (key, title, nominal) in zip(ax, panels):
+    for i, e in enumerate(ETAS):
+        vals = []
+        for n in names:
+            lay = results[n]["L4"][e]
+            vals.append(metrics(lay, results[n]["y"])[key])
+        a_.bar(xs + (i - (len(ETAS) - 1) / 2) * bw, vals, bw, label=f"eta={e}")
+    if nominal:
+        a_.axhline(nominal, color="red", ls="--", lw=1); a_.set_ylim(0, 1)
+    a_.set_xticks(xs); a_.set_xticklabels(names); a_.set_title(title); a_.legend(fontsize=8)
+finish("step4_window_eta_comparison")
 
 # --- 3d. PPD illustrations -----------------------------------------------------
 # Transition case = the forecast time where the evidence weights are most mixed
 # (highest entropy), since that is where the mixture PPD can become multimodal.
-Wc = np.clip(R["W"], 1e-300, 1.0)
+Wc = np.clip(WM, 1e-300, 1.0)
 entropy = -(Wc * np.log(Wc)).sum(axis=1)
 s_mixed = int(R["s"][np.argmax(entropy)])
-print(f"Most mixed weights at t={s_mixed}: {np.round(R['W'][np.argmax(entropy)], 2)}")
+print(f"Most mixed weights at t={s_mixed}: {np.round(WM[np.argmax(entropy)], 2)}")
 cases = [(130, "low-noise period (M1 dominates)"),
-         (s_mixed, "most mixed weights (transition)"),
+         (s_mixed, f"most mixed weights (transition, eta={MAIN_ETA})"),
          (350, "high-noise period (M2 dominates)")]
 fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 for ax_, (s, title) in zip(axes, cases):
     fits = fit_all(s, 100)
     comps = [ppd(fits[m], X_M[m][s]) for m in range(K)]
-    w = softmax(np.array([f["log_ev"] for f in fits]))
+    w = np.exp(log_softmax(MAIN_ETA * np.array([f["log_ev"] for f in fits])))
     lo_ = min(c.ppf(0.001) for c in comps); hi_ = max(c.ppf(0.999) for c in comps)
     grid = np.linspace(lo_, hi_, 800)
     for m in range(K):
