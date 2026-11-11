@@ -1,0 +1,29 @@
+{
+  "hour": 18,
+  "selector": "lasso",
+  "order": [
+    "p_lag1",
+    "load",
+    "p_lag7",
+    "pv_wind",
+    "p_lag2",
+    "mon",
+    "sun",
+    "p_min_lag1",
+    "sat",
+    "p_lag3",
+    "p_max_lag1"
+  ],
+  "sizes": [
+    2,
+    4,
+    7,
+    11
+  ],
+  "window": "rolling 91",
+  "eta": 0.1,
+  "levels": [
+    0.8,
+    0.95
+  ]
+}
