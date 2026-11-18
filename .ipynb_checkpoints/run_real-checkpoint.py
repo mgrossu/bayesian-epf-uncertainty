@@ -27,7 +27,7 @@ from epf_forecast import (run_origin, summarize, mixture_lps, mixture_logw,
 
 # ----------------------------------------------------------------- config
 LEVELS = (0.8, 0.95)                      # nominal interval levels
-ETAS = (1.0, 0.5, 0.25, 0.1)              # inverse temperatures tried
+ETAS = (1.0, 0.5, 0.25, 0.1, 0.0)         # inverse temperatures tried (0 = equal weights, reference)
 WINDOWS = {"expanding": None, "rolling 364": 364, "rolling 91": 91}   # in days
 BURN_IN = 364                             # first validation target (days of history)
 TRAIN_FRAC = 0.8
@@ -104,18 +104,29 @@ print(mix.pivot(index="window", columns="eta", values="lps").round(3).to_string(
 print("single models, validation LPS:")
 print(grid[grid.model != "mixture"].pivot(index="window", columns="model", values="lps").round(3).to_string())
 print(f"\nchosen on validation: window = {BEST_WINDOW}, eta = {BEST_ETA}")
-if BEST_ETA in (min(ETAS), max(ETAS)):
-    print("  note: the best eta is at the edge of the grid")
+pos_etas = [e for e in ETAS if e > 0]
+if BEST_ETA == 0.0 or BEST_ETA == min(pos_etas):
+    print("  note: the best eta is at the lower edge of the grid (eta=0 is the equal-weight reference)")
+
+# The single model for the layer comparison is chosen on VALIDATION data only
+# (in real use the test period is not available for choosing a model).
+gsingle = grid[(grid.window == BEST_WINDOW) & (grid.model != "mixture")]
+SEL_NAME = gsingle.loc[gsingle.lps.idxmax(), "model"]
+SEL_IDX = names.index(SEL_NAME)
+print(f"single model chosen on validation (window {BEST_WINDOW}): {SEL_NAME}")
 json.dump(dict(hour=args.hour, selector=args.selector, order=[FEATURES[j] for j in order],
-               sizes=SIZES, window=BEST_WINDOW, eta=BEST_ETA, levels=LEVELS),
-          open(out("chosen_settings.json"), "w"), indent=2)
+               sizes=SIZES, window=BEST_WINDOW, eta=BEST_ETA, single_model=SEL_NAME,
+               levels=LEVELS), open(out("chosen_settings.json"), "w"), indent=2)
 
 plt.figure(figsize=(7, 4))
+xs_eta = np.arange(len(ETAS))
 for wname in WINDOWS:
-    d = mix[mix.window == wname]
-    plt.plot(d["eta"].astype(float), d["lps"], "o-", label=wname)
-plt.xscale("log"); plt.xlabel("inverse temperature eta"); plt.ylabel("validation log predictive score")
-plt.title("Tuning on train+validation (mixture)"); plt.legend()
+    d = mix[mix.window == wname].set_index("eta").loc[list(ETAS)]
+    plt.plot(xs_eta, d["lps"].values, "o-", label=wname)
+plt.xticks(xs_eta, [str(e) for e in ETAS])
+plt.xlabel("inverse temperature eta (0 = equal weights)"); plt.ylabel("validation log predictive score")
+plt.title("Tuning on train+validation (mixture)")
+plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, fontsize=8)
 savefig("fig_tuning_eta_window.png")
 
 # ----------------------------------------------------------------- 4. test
@@ -133,6 +144,15 @@ show = res[res.window == BEST_WINDOW][cols]
 print(f"window = {BEST_WINDOW} (nominal coverage 80% / 95%; LPS higher = better)")
 print(show.to_string(index=False, na_rep="", float_format=lambda v: f"{v:.3f}"))
 mixrows = res[(res.layer == "L4 mixture PPD")]
+
+# Layer comparison: the single model is the one chosen on validation (not on test).
+cmp_rows = res[(res.window == BEST_WINDOW) & (
+    ((res.model == SEL_NAME) & res.layer.isin(["L1 point", "L2 plug-in", "L3 single PPD"])) |
+    ((res.layer == "L4 mixture PPD") & res.eta.isin([BEST_ETA, 0.0])))][cols]
+cmp_rows.to_csv(out("test_layer_comparison.csv"), index=False)
+print(f"\nLAYER COMPARISON on test (single model {SEL_NAME} chosen on validation; "
+      f"mixture eta={BEST_ETA} tuned on validation; eta=0 = equal-weight reference):")
+print(cmp_rows.to_string(index=False, na_rep="", float_format=lambda v: f"{v:.3f}"))
 print("\nmixture on test, all windows and etas:")
 print(mixrows[["window", "eta", "cov80", "cov95", "width80", "width95", "lps"]]
       .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
@@ -161,7 +181,8 @@ for ax_, l in zip(np.atleast_1d(axs), LEVELS):
         d = sub[sub.layer == layer]
         ax_.scatter(d[wd], (d[c] - l).abs(), marker=mk, color="tab:blue", label=layer)
         for _, r in d.iterrows():
-            ax_.annotate(r["model"], (r[wd], abs(r[c] - l)), fontsize=7, xytext=(3, 3), textcoords="offset points")
+            lab = r["model"] + ("*" if r["model"] == SEL_NAME else "")
+            ax_.annotate(lab, (r[wd], abs(r[c] - l)), fontsize=7, xytext=(3, 3), textcoords="offset points")
     for wname, mk in zip(WINDOWS, ("o", "D", "P")):
         d = mixrows[mixrows.window == wname]
         ax_.scatter(d[wd], (d[c] - l).abs(), marker=mk, color="darkorange",
@@ -169,14 +190,14 @@ for ax_, l in zip(np.atleast_1d(axs), LEVELS):
         for _, r in d.iterrows():
             ax_.annotate(f"eta={r['eta']}", (r[wd], abs(r[c] - l)), fontsize=6, xytext=(3, 3), textcoords="offset points")
     ax_.set_xlabel("mean interval width (EUR/MWh)"); ax_.set_ylabel("coverage error |empirical - nominal|")
-    ax_.set_title(f"{round(l*100)}% intervals (bottom-left is best)"); ax_.legend(fontsize=7)
+    ax_.set_title(f"{round(l*100)}% intervals (bottom-left is best; * = chosen on validation)")
+    ax_.legend(fontsize=7)
 savefig("fig_coverage_error_vs_width.png")
 
 fig, ax = plt.subplots(1, 2, figsize=(10, 3.6), sharey=True)
-best_single = int(np.argmax(stb["logpdf"].mean(axis=0)))
-pit_single = np.array([stb["comps"][i][best_single].cdf(stb["y"][i]) for i in range(len(test_s))])
+pit_single = np.array([stb["comps"][i][SEL_IDX].cdf(stb["y"][i]) for i in range(len(test_s))])
 for a_, pit, ttl in ((ax[0], mixture_pit(stb, BEST_ETA), f"mixture (eta={BEST_ETA})"),
-                     (ax[1], pit_single, f"single PPD {names[best_single]}")):
+                     (ax[1], pit_single, f"single PPD {SEL_NAME} (chosen on validation)")):
     a_.hist(pit, bins=10, range=(0, 1), density=True, color="steelblue", alpha=0.8)
     a_.axhline(1, color="red", ls="--"); a_.set_title("PIT: " + ttl)
 savefig("fig_pit.png")
