@@ -1,0 +1,14 @@
+{
+  "window": "rolling 40",
+  "eta": 0.1,
+  "single_model": "M1",
+  "levels": [
+    0.8,
+    0.95
+  ],
+  "models": [
+    "M1",
+    "M2",
+    "M3"
+  ]
+}

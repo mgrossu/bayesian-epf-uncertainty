@@ -1,0 +1,23 @@
+\begin{tabular}{llrrrrrrr}
+\toprule
+Model & Layer & Cov.\ 80\% & Cov.\ 95\% & Width 80\% & Width 95\% & LPS & RMSE & MAE \\
+\midrule
+M1$^*$ & 1 point &  &  &  &  &  & 2.10 & 1.54 \\
+M1$^*$ & 2 plug-in & 83.8 & 94.6 & 5.49 & 8.39 & -2.073 &  &  \\
+M1$^*$ & 3 posterior pred. & 84.6 & 95.4 & 5.58 & 8.65 & -2.072 &  &  \\
+\addlinespace
+M2 & 1 point &  &  &  &  &  & 2.03 & 1.62 \\
+M2 & 2 plug-in & 75.8 & 93.3 & 4.98 & 7.61 & -2.150 &  &  \\
+M2 & 3 posterior pred. & 76.7 & 93.8 & 5.06 & 7.84 & -2.146 &  &  \\
+\addlinespace
+M3 & 1 point &  &  &  &  &  & 2.13 & 1.51 \\
+M3 & 2 plug-in & 82.9 & 93.8 & 5.27 & 8.06 & -2.122 &  &  \\
+M3 & 3 posterior pred. & 83.3 & 94.2 & 5.37 & 8.32 & -2.098 &  &  \\
+\addlinespace
+mixture & 4 BMA, $\eta=1$ & 83.8 & 94.2 & 4.29 & 6.65 & -1.883 & 1.70 & 1.23 \\
+mixture & 4 BMA, $\eta=0.5$ & 85.0 & 94.2 & 4.34 & 6.74 & -1.877 & 1.70 & 1.24 \\
+mixture & 4 BMA, $\eta=0.25$ & 85.8 & 95.0 & 4.51 & 7.06 & -1.869 & 1.69 & 1.24 \\
+mixture & 4 BMA, $\eta=0.1$ & 87.5 & 96.7 & 5.01 & 7.97 & -1.892 & 1.72 & 1.29 \\
+mixture & 4 BMA, $\eta=0$ & 85.8 & 97.1 & 5.75 & 8.92 & -2.006 & 1.91 & 1.45 \\
+\bottomrule
+\end{tabular}

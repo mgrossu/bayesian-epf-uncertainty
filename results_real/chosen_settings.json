@@ -1,4 +1,17 @@
 {
+  "window": "rolling 91",
+  "eta": 0.1,
+  "single_model": "top7",
+  "levels": [
+    0.8,
+    0.95
+  ],
+  "models": [
+    "top2",
+    "top4",
+    "top7",
+    "top11"
+  ],
   "hour": 18,
   "selector": "lasso",
   "order": [
@@ -19,12 +32,5 @@
     4,
     7,
     11
-  ],
-  "window": "rolling 91",
-  "eta": 0.1,
-  "single_model": "top7",
-  "levels": [
-    0.8,
-    0.95
   ]
 }
